@@ -164,3 +164,44 @@ func NodeSplit3(old BNode) (uint16, [3]BNode) {
 	assert(leftleft.Nbytes() <= BTREE_PAGE_SIZE)
 	return 3, [3]BNode{leftleft, middle, right}
 }
+
+// replace a link with multiple links
+func NodeReplacedKidN(tree *BTree, new BNode, old BNode, idx uint16, kids ...BNode) {
+	inc := uint16(len(kids))
+	new.SetHeader(BNODE_NODE, old.Nkeys()+inc-1)
+	NodeAppendRange(new, old, 0, 0, idx)
+	for i, node := range kids {
+		NodeAppendKV(new, idx+uint16(i), tree.New(node), node.GetKey(0), nil)
+	}
+	NodeAppendRange(new, old, idx+inc, idx+1, old.Nkeys()-(idx+1))
+}
+
+// remove a key from a leaf node
+func LeafDelete(new BNode, old BNode, idx uint16) {
+	new.SetHeader(BNODE_LEAF, old.Nkeys()-1)
+	NodeAppendRange(new, old, 0, 0, idx)
+	NodeAppendRange(new, old, idx, idx+1, old.Nkeys()-(idx+1))
+}
+
+// delete a key from a tree
+func TreeDelete(tree *BTree, node BNode, key []byte) BNode {
+	idx := NodeLookupLE(node, key)
+	switch node.Btype() {
+	case BNODE_LEAF:
+		if !bytes.Equal(key, node.GetKey(idx)) {
+			return BNode{} // not found
+		}
+		// delete the key in the leaf
+		new := BNode{Data: make([]byte, BTREE_PAGE_SIZE)}
+		LeafDelete(new, node, idx)
+		return new
+	case BNODE_NODE:
+		return NodeDelete(tree, node, idx, key)
+	default:
+		panic("bad mode")
+	}
+}
+
+func NodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
+
+}
