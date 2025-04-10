@@ -137,7 +137,7 @@ func NodeInsert(tree *BTree, new BNode, node BNode, idx uint16, key []byte, val 
 	// split the result
 	nsplit, splited := NodeSplit3(knode)
 	// update the kid links
-	NodeReplacedKidN(tree, new, node, idx, splited[:nsplit]...)
+	NodeReplaceKidN(tree, new, node, idx, splited[:nsplit]...)
 }
 
 func NodeSplit2(left BNode, right BNode, old BNode) {
@@ -166,7 +166,7 @@ func NodeSplit3(old BNode) (uint16, [3]BNode) {
 }
 
 // replace a link with multiple links
-func NodeReplacedKidN(tree *BTree, new BNode, old BNode, idx uint16, kids ...BNode) {
+func NodeReplaceKidN(tree *BTree, new BNode, old BNode, idx uint16, kids ...BNode) {
 	inc := uint16(len(kids))
 	new.SetHeader(BNODE_NODE, old.Nkeys()+inc-1)
 	NodeAppendRange(new, old, 0, 0, idx)
@@ -203,5 +203,63 @@ func TreeDelete(tree *BTree, node BNode, key []byte) BNode {
 }
 
 func NodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
+	kptr := node.GetPtr(idx)
+	updated := TreeDelete(tree, tree.Get(kptr), key)
+	if len(updated.Data) == 0 {
+		return BNode{} // not found
+	}
+	tree.Del(kptr)
 
+	new := BNode{Data: make([]byte, BTREE_PAGE_SIZE)}
+	// check for merging
+	mergeDir, sibling := ShouldMerge(tree, node, idx, updated)
+	switch {
+	case mergeDir < 0: // left
+		merged := BNode{Data: make([]byte, BTREE_PAGE_SIZE)}
+		NodeMerge(merged, sibling, updated)
+		tree.Del(node.GetPtr(idx - 1))
+		NodeReplace2Kid(new, node, idx-1, tree.New(merged), merged.GetKey(0))
+	case mergeDir > 0: // right
+		merged := BNode{Data: make([]byte, BTREE_PAGE_SIZE)}
+		NodeMerge(merged, updated, sibling)
+		tree.Del(node.GetPtr(idx + 1))
+		nodeReplace2Kid(new, node, idx, tree.New(merged), merged.GetKey(0))
+	case mergeDir == 0:
+		assert(updated.Nkeys() > 0)
+		NodeReplaceKidN(tree, new, node, idx, updated)
+	}
+	return new
+}
+
+// merge 2 nodes into 1
+func NodeMerge(new BNode, left BNode, right BNode) {
+	new.SetHeader(left.Btype(), left.Nkeys()+right.Nkeys())
+	NodeAppendRange(new, left, 0, 0, left.Nkeys())
+	NodeAppendRange(new, right, left.Nkeys(), 0, right.Nkeys())
+}
+
+func ShouldMerge(tree *BTree, node BNode, idx uint16, updated BNode) (int, BNode) {
+	if updated.Nbytes() > BTREE_PAGE_SIZE/4 {
+		return 0, BNode{}
+	}
+
+	if idx > 0 {
+		sibling := tree.Get(node.GetPtr(idx - 1))
+		merged := sibling.Nbytes() + updated.Nbytes() - HEADER
+		if merged <= BTREE_PAGE_SIZE {
+			return -1, sibling
+		}
+	}
+	if idx+1 < node.Nkeys() {
+		sibling := tree.Get(node.GetPtr(idx + 1))
+		merged := sibling.Nbytes() + updated.Nbytes() - HEADER
+		if merged <= BTREE_PAGE_SIZE {
+			return +1, sibling
+		}
+	}
+	return 0, BNode{}
+}
+
+func (tree * Btree) Delete(key []byte) bool {
+	
 }
