@@ -14,16 +14,14 @@ type BTree struct {
 	Del func(uint64)       // deallocate a page
 }
 
-const (
-	HEADER             = 4
-	BTREE_PAGE_SIZE    = 4096
-	BTREE_MAX_KEY_SIZE = 1000
-	BTREE_MAX_VAL_SIZE = 3000
-)
+const HEADER = 4
+const BTREE_PAGE_SIZE = 4096
+const BTREE_MAX_KEY_SIZE = 1000
+const BTREE_MAX_VAL_SIZE = 3000
 
 func init() {
 	node1max := HEADER + 8 + 2 + 4 + BTREE_MAX_KEY_SIZE + BTREE_MAX_VAL_SIZE
-	assert(node1max > BTREE_PAGE_SIZE)
+	assert(node1max <= BTREE_PAGE_SIZE, "init")
 }
 
 // returns the first kid node whose range intersects the key. (kid[i] <= key)
@@ -60,8 +58,8 @@ func LeafUpdate(new BNode, old BNode, idx uint16, key []byte, val []byte) {
 
 // copy multiple KVs into position
 func NodeAppendRange(new BNode, old BNode, dstNew uint16, srcOld uint16, n uint16) {
-	assert(dstNew+n <= old.Nkeys())
-	assert(dstNew+n <= new.Nkeys())
+	assert(srcOld+n <= old.Nkeys(), "NodeAppendRange 1")
+	assert(dstNew+n <= new.Nkeys(), "NodeAppendRange 2")
 	if n == 0 {
 		return
 	}
@@ -141,7 +139,19 @@ func NodeInsert(tree *BTree, new BNode, node BNode, idx uint16, key []byte, val 
 }
 
 func NodeSplit2(left BNode, right BNode, old BNode) {
-	// Todo
+	nkeys := old.Nkeys()
+	// Find the middle point for splitting
+	mid := nkeys / 2
+
+	// Set headers for both nodes
+	left.SetHeader(old.Btype(), mid)
+	right.SetHeader(old.Btype(), nkeys-mid)
+
+	// Copy the first half to the left node
+	NodeAppendRange(left, old, 0, 0, mid)
+
+	// Copy the second half to the right node
+	NodeAppendRange(right, old, 0, mid, nkeys-mid)
 }
 
 // split a node if it's too big. the result are 1 - 3 node
@@ -161,7 +171,7 @@ func NodeSplit3(old BNode) (uint16, [3]BNode) {
 	leftleft := BNode{make([]byte, BTREE_PAGE_SIZE)}
 	middle := BNode{make([]byte, BTREE_PAGE_SIZE)}
 	NodeSplit2(leftleft, middle, left)
-	assert(leftleft.Nbytes() <= BTREE_PAGE_SIZE)
+	assert(leftleft.Nbytes() <= BTREE_PAGE_SIZE, "NodeSplit3")
 	return 3, [3]BNode{leftleft, middle, right}
 }
 
@@ -223,12 +233,27 @@ func NodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
 		merged := BNode{Data: make([]byte, BTREE_PAGE_SIZE)}
 		NodeMerge(merged, updated, sibling)
 		tree.Del(node.GetPtr(idx + 1))
-		nodeReplace2Kid(new, node, idx, tree.New(merged), merged.GetKey(0))
+		NodeReplace2Kid(new, node, idx, tree.New(merged), merged.GetKey(0))
 	case mergeDir == 0:
-		assert(updated.Nkeys() > 0)
+		assert(updated.Nkeys() > 0, "NodeDelete")
 		NodeReplaceKidN(tree, new, node, idx, updated)
 	}
 	return new
+}
+
+// NodeReplace2Kid replaces two consecutive kid pointers with a single one
+// This is used during node merging operations
+func NodeReplace2Kid(new BNode, old BNode, idx uint16, ptr uint64, key []byte) {
+	new.SetHeader(BNODE_NODE, old.Nkeys()-1)
+
+	// Copy the range before the replaced kids
+	NodeAppendRange(new, old, 0, 0, idx)
+
+	// Add the new merged kid
+	NodeAppendKV(new, idx, ptr, key, nil)
+
+	// Copy the range after the replaced kids
+	NodeAppendRange(new, old, idx+1, idx+2, old.Nkeys()-(idx+2))
 }
 
 // merge 2 nodes into 1
@@ -260,6 +285,58 @@ func ShouldMerge(tree *BTree, node BNode, idx uint16, updated BNode) (int, BNode
 	return 0, BNode{}
 }
 
-func (tree * Btree) Delete(key []byte) bool {
-	
+func (tree *BTree) Delete(key []byte) bool {
+	assert(len(key) != 0, "Delete 1")
+	assert(len(key) <= BTREE_MAX_KEY_SIZE, "Delete 2")
+	if tree.Root == 0 {
+		return false
+	}
+
+	updated := TreeDelete(tree, tree.Get(tree.Root), key)
+	if len(updated.Data) == 0 {
+		return false // not found
+	}
+
+	tree.Del(tree.Root)
+	if updated.Btype() == BNODE_NODE && updated.Nkeys() == 1 {
+		// remove a level
+		tree.Root = updated.GetPtr(0)
+	} else {
+		tree.Root = tree.New(updated)
+	}
+	return true
+}
+
+// the interface
+func (tree *BTree) Insert(key []byte, val []byte) {
+	assert(len(key) != 0, "Insert 1")
+	assert(len(key) <= BTREE_MAX_KEY_SIZE, "Insert 2")
+	assert(len(val) <= BTREE_MAX_VAL_SIZE, "Insert 3")
+	if tree.Root == 0 {
+		// create the first node
+		root := BNode{Data: make([]byte, BTREE_PAGE_SIZE)}
+		root.SetHeader(BNODE_LEAF, 2)
+		// a dummy key, this makes the tree cover the whole key space.
+		// thus a lookup can always find a containing node.
+		NodeAppendKV(root, 0, 0, nil, nil)
+		NodeAppendKV(root, 1, 0, key, val)
+		tree.Root = tree.New(root)
+		return
+	}
+	node := tree.Get(tree.Root)
+	tree.Del(tree.Root)
+	node = treeInsert(tree, node, key, val)
+	nsplit, splitted := NodeSplit3(node)
+	if nsplit > 1 {
+		// the root was split, add a new level.
+		root := BNode{Data: make([]byte, BTREE_PAGE_SIZE)}
+		root.SetHeader(BNODE_NODE, nsplit)
+		for i, knode := range splitted[:nsplit] {
+			ptr, key := tree.New(knode), knode.GetKey(0)
+			NodeAppendKV(root, uint16(i), ptr, key, nil)
+		}
+		tree.Root = tree.New(root)
+	} else {
+		tree.Root = tree.New(splitted[0])
+	}
 }
